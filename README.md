@@ -49,7 +49,7 @@ Please use the uninstall feature carefully, as removing software may result in p
 
 ## Author
 
-**Gradus and [Deepseek](https://chat.deepseek.com/)**
+**Gradus and [Deepseek](https://chat.deepseek.com/) and [ChatGPT](https://chatgpt.com/)**
 
 ---
 
