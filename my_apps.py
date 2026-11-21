@@ -10,9 +10,10 @@ import re
 import subprocess
 import requests
 import json
+import threading
 
 # ==========================================
-# ЛОГИКА ПОИСКА ПРОГРАММ (Без изменений)
+# ЛОГИКА ПОИСКА ПРОГРАММ
 # ==========================================
 def get_steam_games():
     steam_paths = []
@@ -28,7 +29,7 @@ def get_steam_games():
         if os.path.exists(vdf_path):
             with open(vdf_path, "r", encoding="utf-8") as f:
                 content = f.read()
-                paths = re.findall(r'"path"\s+"([^"]+)"', content)
+                paths = re.findall(r'"path"\s+"\s*([^"]+)"', content)
                 for p in paths:
                     library_folders.append(p.replace("\\\\", "\\"))
                     
@@ -82,10 +83,15 @@ def get_installed_apps():
                                     clean_path = re.sub(r'"?[^"\\]*\.exe"?.*$', '', uninstall_cmd, flags=re.IGNORECASE).strip('" ')
                                     install_path = clean_path if os.path.exists(clean_path) else "Путь не найден"
                                 
+                                # ← ФИЛЬТРАЦИЯ: пропускаем программы без пути
+                                if "Путь не найден" in install_path:
+                                    continue
+                                
                                 apps.append({
-                                    "name": name, 
+                                    "name": name,
                                     "path": install_path,
-                                    "uninstall_cmd": uninstall_cmd
+                                    "uninstall_cmd": uninstall_cmd,
+                                    "size": None
                                 })
                             except FileNotFoundError:
                                 pass
@@ -95,49 +101,87 @@ def get_installed_apps():
             pass
     return sorted(apps, key=lambda x: x["name"].lower())
 
+# ==========================================
+# ФУНКЦИИ ДЛЯ РАЗМЕРА
+# ==========================================
+def get_folder_size(path):
+    total_size = 0
+    try:
+        if os.path.exists(path) and os.path.isdir(path):
+            for dirpath, dirnames, filenames in os.walk(path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if not os.path.islink(fp):
+                        total_size += os.path.getsize(fp)
+    except Exception:
+        pass
+    return total_size
+
+def format_size(bytes_size):
+    if bytes_size == 0: return "0 Б"
+    for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']:
+        if bytes_size < 1024.0: return f"{bytes_size:.1f} {unit}"
+        bytes_size /= 1024.0
+    return f"{bytes_size:.1f} ПБ"
+
 # --- БЛОК АВТООБНОВЛЕНИЯ ---
-CURRENT_VERSION = "0.1.3"  # Версия твоей текущей программы
-VERSION_URL = "https://raw.githubusercontent.com/graduskayot/Program-nalyzer/refs/heads/main/version.json"  # Ссылка на твой version.json
+CURRENT_VERSION = "0.1.3"
+VERSION_URL = "https://raw.githubusercontent.com/graduskayot/Program-nalyzer/refs/heads/main/version.json"
 
 def check_update(page):
     try:
-        # Пытаемся скачать файл с версией
         response = requests.get(VERSION_URL, timeout=5)
         data = response.json()
         latest = data["latest_version"]
-        
-        # Если версия в файле отличается от нашей
         if latest != CURRENT_VERSION:
-            # Создаем блокирующее окно
             dlg = ft.AlertDialog(
-                modal=True, # Блокирует всё остальное
+                modal=True,
                 title=ft.Text("🚨 Доступно обновление"),
                 content=ft.Text(f"Вышла новая версия {latest}. Программа не будет работать, пока вы не обновитесь."),
-                actions=[
-                    ft.TextButton("Скачать обновление и закрыть", on_click=lambda e: os.startfile(data["download_url"]) or sys.exit())
-                ],
+                actions=[ft.TextButton("Скачать обновление и закрыть", on_click=lambda e: os.startfile(data["download_url"]) or sys.exit())],
             )
             page.dialog = dlg
             dlg.open = True
             page.update()
-            return False # Возвращаем False = БЛОКИРУЕМ ЗАПУСК
+            return False
     except Exception:
-        # Если интернета нет или файл не найден — просто продолжаем работу
-        pass 
-    return True # Возвращаем True = ВСЁ ОК, РАБОТАЕМ
+        pass
+    return True
 
 # ==========================================
 # ИНТЕРФЕЙС НА FLET
 # ==========================================
 def main(page: ft.Page):
     page.title = "Анализатор приложений by Gradus"
-        # Проверяем обновление. Если версия старая — код дальше не пойдет
-    if not check_update(page):
-        return
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 20
 
-    # --- Language settings (saved between launches) ---
+    # 1. ЭКРАН ЗАГРУЗКИ
+    loading_view = ft.View(
+        "/",
+        [
+            ft.Column(
+                [
+                    ft.ProgressRing(width=50, height=50, stroke_width=4),
+                    ft.Text("Сканирую установленные программы...", size=20, weight=ft.FontWeight.BOLD),
+                    ft.Text("Это может занять несколько секунд", color=ft.Colors.GREY_500),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=20,
+            )
+        ],
+        vertical_alignment=ft.MainAxisAlignment.CENTER,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    page.views.append(loading_view)
+    page.update()
+
+    # 2. ПРОВЕРКА ОБНОВЛЕНИЙ
+    if not check_update(page):
+        return
+
+    # --- Language settings ---
     settings_path = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "AnalyserApps", "settings.json")
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     try:
@@ -147,31 +191,36 @@ def main(page: ft.Page):
         settings = {"language": "ru"}
     current_language = settings.get("language", "ru")
 
-    # Edit these values to add your own translations.
     translations = {
         "ru": {
             "title": "Список установленных программ", "search": "🔍 Поиск по названию...",
             "scan": "🔄 Сканировать заново", "settings": "⚙️ Настройки", "language": "Язык",
             "settings_title": "Настройки", "save": "Сохранить", "cancel": "Отмена",
-            "open": "📂 Открыть", "run": "▶️ Запустить", "delete": "🗑️ Удалить",
+            "open": "📂 Открыть", "run": "▶️ Запустить", "delete": "🗑 Удалить",
             "folder_missing": "Папка не найдена: {path}", "exe_missing": "Не найден .exe для запуска.",
             "launch_error": "Ошибка запуска: {error}", "uninstall_missing": "Команда удаления не найдена.",
-            "uninstall_error": "Ошибка удаления: {error}",
+            "uninstall_error": "Ошибка удаления: {error}", "size_calc": "⏳ Считаю...",
         },
         "en": {
             "title": "Installed applications", "search": "🔍 Search by name...",
             "scan": "🔄 Scan again", "settings": "⚙️ Settings", "language": "Language",
             "settings_title": "Settings", "save": "Save", "cancel": "Cancel",
-            "open": "📂 Open", "run": "▶️ Launch", "delete": "🗑️ Uninstall",
+            "open": "📂 Open", "run": "▶️ Launch", "delete": "🗑 Uninstall",
             "folder_missing": "Folder not found: {path}", "exe_missing": "No .exe file found.",
             "launch_error": "Launch error: {error}", "uninstall_missing": "Uninstall command not found.",
-            "uninstall_error": "Uninstall error: {error}",
+            "uninstall_error": "Uninstall error: {error}", "size_calc": "⏳ Calculating...",
         },
     }
 
     def tr(key, **kwargs):
         return translations.get(current_language, translations["ru"]).get(key, key).format(**kwargs)
 
+    def refresh_texts():
+        title.value = tr("title")
+        search_field.hint_text = tr("search")
+        scan_button.text = tr("scan")
+        settings_button.text = tr("settings")
+        page.update()
 
     def save_language(language):
         nonlocal current_language
@@ -182,26 +231,24 @@ def main(page: ft.Page):
                 json.dump(settings, settings_file, ensure_ascii=False, indent=2)
         except OSError:
             pass
+        
         refresh_texts()
-        update_list(search_field.value or "")
+        update_list(search_field.value or "", recalc_sizes=False)
 
-    # Список для хранения всех программ
     all_apps = []
+    list_view = ft.ListView(expand=True, spacing=5, padding=10)
 
-    # Список приложений (создаётся один раз и обновляется при поиске)
-    list_view = ft.ListView(
-        expand=True,
-        spacing=5,
-        padding=10,
-    )
-
-    # Функция для обновления списка
-    def update_list(filter_text=""):
+    def update_list(filter_text="", recalc_sizes=True):
         list_view.controls.clear()
         search_lower = (filter_text or "").lower()
 
         for app in all_apps:
             if search_lower in app['name'].lower():
+                if recalc_sizes:
+                    size_text = ft.Text(tr("size_calc"), color=ft.Colors.GREY_500, size=12)
+                else:
+                    size_text = ft.Text(app.get('size', ""), color=ft.Colors.GREY_500, size=12)
+                
                 row = ft.Row(
                     controls=[
                         ft.Column(
@@ -229,6 +276,7 @@ def main(page: ft.Page):
                                     on_click=lambda e, a=app: uninstall_app(a),
                                     style=ft.ButtonStyle(bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE),
                                 ),
+                                size_text,
                             ],
                             spacing=5,
                         ),
@@ -246,9 +294,17 @@ def main(page: ft.Page):
                     )
                 )
 
+                if recalc_sizes:
+                    def calc_size(path, txt_ctrl, app_ref):
+                        s = get_folder_size(path)
+                        formatted = f"📦 {format_size(s)}"
+                        app_ref['size'] = formatted
+                        txt_ctrl.value = formatted
+                        page.update()
+                    threading.Thread(target=calc_size, args=(app['path'], size_text, app), daemon=True).start()
+
         page.update()
 
-    # Функции действий
     def open_folder(path):
         if os.path.exists(path) and os.path.isdir(path):
             os.startfile(path)
@@ -262,7 +318,6 @@ def main(page: ft.Page):
         if os.path.exists(path) and os.path.isdir(path):
             exe_files = [f for f in os.listdir(path) if f.lower().endswith('.exe')]
             valid_exe = [f for f in exe_files if not any(x in f.lower() for x in ['unins', 'setup', 'update', 'install'])]
-            
             if valid_exe:
                 try:
                     os.startfile(os.path.join(path, valid_exe[0]))
@@ -286,8 +341,6 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
             return
-        
-        # В Flet для подтверждения можно использовать диалог, но для простоты запустим сразу
         try:
             subprocess.Popen(cmd, shell=True)
         except Exception as e:
@@ -295,44 +348,20 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
 
-    # Функция сканирования
     def scan_apps(e=None):
         nonlocal all_apps
         all_apps = get_installed_apps()
-        update_list(search_field.value)
+        for app in all_apps:
+            app['size'] = None
+        update_list(search_field.value, recalc_sizes=True)
 
-    # Функция поиска
     def on_search_change(e):
-        update_list(e.control.value)
+        update_list(e.control.value, recalc_sizes=False)
 
-    # Элементы интерфейса
     title = ft.Text(tr("title"), size=24, weight=ft.FontWeight.BOLD)
-    
-    search_field = ft.TextField(
-        hint_text=tr("search"),
-        width=400,
-        on_change=on_search_change,
-        border_radius=20,
-    )
-    
-    scan_button = ft.ElevatedButton(
-        tr("scan"),
-        on_click=scan_apps,
-        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE),
-    )
-
-    settings_button = ft.ElevatedButton(
-        tr("settings"),
-        on_click=lambda e: open_settings(),
-        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE),
-    )
-
-    def refresh_texts():
-        title.value = tr("title")
-        search_field.hint_text = tr("search")
-        scan_button.text = tr("scan")
-        settings_button.text = tr("settings")
-        page.update()
+    search_field = ft.TextField(hint_text=tr("search"), width=400, on_change=on_search_change, border_radius=20)
+    scan_button = ft.ElevatedButton(tr("scan"), on_click=scan_apps, style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE))
+    settings_button = ft.ElevatedButton(tr("settings"), on_click=lambda e: open_settings(), style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE))
 
     def open_settings():
         language_dropdown = ft.Dropdown(
@@ -341,38 +370,47 @@ def main(page: ft.Page):
             options=[ft.dropdown.Option("ru", "Русский"), ft.dropdown.Option("en", "English")],
             width=250,
         )
+
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(tr("settings_title")),
             content=language_dropdown,
             actions=[
                 ft.TextButton(tr("cancel"), on_click=lambda e: close_dialog()),
-                ft.TextButton(tr("save"), on_click=lambda e: (save_language(language_dropdown.value), close_dialog())),
+                ft.TextButton(
+                    tr("save"),
+                    on_click=lambda e: save_and_close(language_dropdown.value),
+                ),
             ],
         )
-        def close_dialog():
-            dialog.open = False
-            page.update()
-        page.dialog = dialog
-        dialog.open = True
-        page.update()
 
-    # Собираем страницу
-    page.add(
-        ft.Column(
-            [
-                title,
-                ft.Row([scan_button, settings_button], alignment=ft.MainAxisAlignment.CENTER),
-                ft.Row([search_field], alignment=ft.MainAxisAlignment.CENTER),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                list_view,
-            ],
-            expand=True,
-        )
+        def close_dialog():
+            page.close(dialog)
+
+        def save_and_close(language):
+            save_language(language)
+            close_dialog()
+
+        page.open(dialog)
+
+    # 3. ПЕРЕКЛЮЧЕНИЕ ЭКРАНОВ
+    all_apps = get_installed_apps()
+    update_list()
+
+    main_view = ft.View(
+        "/main",
+        [
+            title,
+            ft.Row([scan_button, settings_button], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Row([search_field], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+            list_view,
+        ],
     )
 
-    # Первоначальная загрузка
-    scan_apps()
+    page.views.clear()
+    page.views.append(main_view)
+    page.update()
 
 if __name__ == "__main__":
     ft.app(main)
