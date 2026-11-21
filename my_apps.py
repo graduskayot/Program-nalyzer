@@ -125,7 +125,7 @@ def format_size(bytes_size):
     return f"{bytes_size:.1f} ПБ"
 
 # --- БЛОК АВТООБНОВЛЕНИЯ ---
-CURRENT_VERSION = "0.1.3"
+CURRENT_VERSION = "0.1.4"
 VERSION_URL = "https://raw.githubusercontent.com/graduskayot/Program-nalyzer/refs/heads/main/version.json"
 
 def check_update(page):
